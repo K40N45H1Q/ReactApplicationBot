@@ -4,9 +4,12 @@ from aiogram.fsm.state import default_state
 from aiogram.types import CallbackQuery, Message, InputMediaPhoto, FSInputFile
 from states import ItemForm, DeleteItemForm
 from markups import confirmation, menu, gender_choice, category_choice, product_choice
-from api.crud import create_product, del_product
-from api.database import session
-from api.models import Product
+from dotenv import dotenv_values
+from httpx import AsyncClient
+
+config = dotenv_values(".env")
+API_URL = config["API_URL"]
+BOT_TOKEN = config["BOT_TOKEN"]
 
 router = Router()
 
@@ -57,9 +60,15 @@ async def get_gender(callback_query: CallbackQuery, state: FSMContext, bot: Bot)
 
 @router.callback_query(DeleteItemForm.product_id)
 async def delete_product(callback_query: CallbackQuery, state: FSMContext):
-    async with session() as async_session:
-        await del_product(async_session, int(callback_query.data))
-    await callback_query.answer("🗑️ Item deleted!")
+    product_id = int(callback_query.data)
+
+    async with AsyncClient() as client:
+        response = await client.delete(f"{API_URL}/delete_product/{product_id}")
+        if response.status_code == 200:
+            await callback_query.answer("🗑️ Item deleted!")
+        else:
+            await callback_query.answer("❌ Error deleting item", show_alert=True)
+
     await callback_query.message.edit_caption(
         caption=(
             "✨ <b>Welcome to our store!</b>\n\n"
@@ -71,8 +80,8 @@ async def delete_product(callback_query: CallbackQuery, state: FSMContext):
 
 @router.callback_query(ItemForm.category)
 async def get_category_callback(callback_query: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
     await state.update_data({"category": callback_query.data})
+    data = await state.get_data()
 
     if data["action"] == "add_item":
         await callback_query.message.edit_caption(caption="📝 Enter item title:")
@@ -82,8 +91,8 @@ async def get_category_callback(callback_query: CallbackQuery, state: FSMContext
 
 @router.message(ItemForm.category)
 async def get_category_text(message: Message, state: FSMContext, bot: Bot):
-    data = await state.get_data()
     await state.update_data({"category": message.text})
+    data = await state.get_data()
 
     if data["action"] == "add_item":
         await bot.edit_message_caption(
@@ -97,8 +106,8 @@ async def get_category_text(message: Message, state: FSMContext, bot: Bot):
 
 @router.message(ItemForm.title)
 async def get_title(message: Message, state: FSMContext, bot: Bot):
-    data = await state.get_data()
     await state.update_data({"title": message.text})
+    data = await state.get_data()
 
     if data["action"] == "add_item":
         await bot.edit_message_caption(
@@ -113,8 +122,8 @@ async def get_title(message: Message, state: FSMContext, bot: Bot):
 @router.message(ItemForm.photo)
 async def get_photo(message: Message, state: FSMContext, bot: Bot):
     if message.photo:
-        data = await state.get_data()
         await state.update_data({"photo": message.photo[-1].file_id})
+        data = await state.get_data()
         await bot.edit_message_caption(
             caption="💶 Enter item price in EUR:",
             chat_id=message.from_user.id,
@@ -153,14 +162,27 @@ async def confirm_item(callback_query: CallbackQuery, state: FSMContext, bot: Bo
     data = await state.get_data()
 
     if callback_query.data == "allow" and data["action"] == "add_item":
-        async with session() as async_session:
-            await create_product(session, {
+        # Получаем file_path через Telegram API
+        async with AsyncClient() as client:
+            file_info = await client.get(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
+                params={"file_id": data["photo"]}
+            )
+            file_path = file_info.json()["result"]["file_path"]
+            image_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+
+            # Отправляем товар на FastAPI сервер
+            response = await client.post(f"{API_URL}/add_product/", json={
                 "name": data["title"],
                 "category": data["category"],
                 "price": int(data["price"]),
-                "photo": data["photo"],
-                "gender": data["gender"]
+                "gender": data["gender"],
+                "image_url": image_url
             })
+
+            if response.status_code != 200:
+                await callback_query.answer("❌ Failed to add product", show_alert=True)
+                return
 
     await callback_query.answer("✅ Item added!" if callback_query.data == "allow" else "❌ Cancelled!")
 
